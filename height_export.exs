@@ -4,32 +4,33 @@ defmodule Height do
   alias NimbleCSV.RFC4180, as: CSV
   require Logger
 
-  @status_order ["To do", "Doing", "QA Engenharia", "Done"]
-
   def run do
     Finch.start_link(name: Height)
     :telemetry.attach(__MODULE__, [:finch, :request, :stop], &__MODULE__.handle_event/4, nil)
 
-    status_map = get_status_map()
-    stories_list = get_stories_list()
+    {opts, _argv} = OptionParser.parse!(System.argv(), strict: [list: :string])
 
-    stories_list
-    |> Map.fetch!("id")
+    list_name = Keyword.get(opts, :list, "stories")
+
+    status_map = get_status_map()
+    list = get_list(list_name, status_map)
+
+    list
     |> get_tasks(status_map)
     |> map("Getting activities", fn task ->
       activities =
         task.id
-        |> get_activities(status_map)
-        |> Enum.reject(&status_surpassed?(&1.status, task.status))
+        |> get_activities(list, status_map)
+        |> Enum.reject(&status_surpassed?(&1.status, task.status, list))
 
       Map.put(task, :activities, activities)
     end)
-    |> tap(&write_to_json/1)
-    |> tap(&write_to_csv/1)
+    |> tap(&write_to_json(&1, list))
+    |> tap(&write_to_csv(&1, list))
   end
 
-  defp write_to_json(result) do
-    file_name = "height-stories-#{Date.utc_today()}.json"
+  defp write_to_json(result, list) do
+    file_name = "height-#{list.key}-#{Date.utc_today()}.json"
     file_path = Path.join(File.cwd!(), file_name)
 
     result
@@ -39,31 +40,25 @@ defmodule Height do
     Logger.info("Results written to #{file_path}")
   end
 
-  defp write_to_csv(result) do
-    file_name = "height-stories-#{Date.utc_today()}.csv"
+  defp write_to_csv(result, list) do
+    file_name = "height-#{list.key}-#{Date.utc_today()}.csv"
     file_path = Path.join(File.cwd!(), file_name)
 
     result
     |> Enum.map(fn task ->
       [
         task.index,
-        task.name,
-        get_date_of_status_change(task, 0),
-        get_date_of_status_change(task, 1),
-        get_date_of_status_change(task, 2),
-        get_date_of_status_change(task, 3)
-      ]
+        task.name
+      ] ++ Enum.map(list.visible_sections, &get_date_of_status_change(task, &1))
     end)
-    |> prepend(["#id", "item name", "TODO", "DOING", "QA", "DONE"])
+    |> prepend(["#id", "item name"] ++ list.visible_sections)
     |> CSV.dump_to_iodata()
     |> then(&File.write!(file_path, &1))
 
     Logger.info("Results written to #{file_path}")
   end
 
-  defp get_date_of_status_change(task, column_index) do
-    status = Enum.at(@status_order, column_index)
-
+  defp get_date_of_status_change(task, status) do
     case Enum.find(task.activities, fn a -> a.status == status end) do
       nil -> nil
       %{} = activity -> Calendar.strftime(activity.created_at, "%d/%m/%y")
@@ -91,12 +86,14 @@ defmodule Height do
     |> Map.fetch!("list")
     |> Enum.filter(fn template -> template["name"] == "Status" end)
     |> Enum.flat_map(fn template -> template["labels"] end)
-    |> Map.new(fn template -> {template["id"], template["value"]} end)
+    |> Map.new(fn template ->
+      {template["id"], %{value: template["value"], deleted: template["deleted"]}}
+    end)
   end
 
-  defp get_tasks(list_id, status_map) do
+  defp get_tasks(list, status_map) do
     filters = %{
-      "listIds" => %{"values" => [list_id]}
+      "listIds" => %{"values" => [list.id]}
     }
 
     "/tasks"
@@ -109,16 +106,16 @@ defmodule Height do
       %{
         id: task["id"],
         created_at: DateTime.to_date(datetime),
-        status: Map.fetch!(status_map, task["status"]),
+        status: Map.fetch!(status_map, task["status"]).value,
         name: task["name"],
         index: task["index"]
       }
     end)
-    |> Enum.filter(&supported_status?(&1.status))
+    |> Enum.filter(&supported_status?(&1.status, list))
     |> Enum.sort_by(& &1.created_at, Date)
   end
 
-  defp get_activities(task_id, status_map) do
+  defp get_activities(task_id, list, status_map) do
     "/activities"
     |> get(%{"taskId" => task_id})
     |> Map.fetch!("list")
@@ -127,29 +124,40 @@ defmodule Height do
       {:ok, datetime, _tz} = DateTime.from_iso8601(activity["createdAt"])
 
       %{
-        status: Map.fetch!(status_map, activity["newValue"]),
+        status: Map.fetch!(status_map, activity["newValue"]).value,
         created_at: DateTime.to_date(datetime)
       }
     end)
     |> Enum.sort_by(& &1.created_at, Date)
     |> Enum.uniq_by(fn activity -> activity.status end)
-    |> Enum.filter(&supported_status?(&1.status))
+    |> Enum.filter(&supported_status?(&1.status, list))
   end
 
-  defp get_stories_list do
-    "/lists"
-    |> get()
-    |> Map.fetch!("list")
-    |> Enum.find(fn item -> item["key"] == "stories" end)
+  defp get_list(key, status_map) do
+    list =
+      "/lists"
+      |> get()
+      |> Map.fetch!("list")
+      |> Enum.find(fn item -> item["key"] == key end)
+
+    visible_sections =
+      list["viewBy"]["visibleSectionIds"]
+      |> Enum.map(fn status ->
+        Map.fetch!(status_map, status)
+      end)
+      |> Enum.reject(& &1.deleted)
+      |> Enum.map(& &1.value)
+
+    %{id: list["id"], visible_sections: visible_sections, key: key}
   end
 
-  defp supported_status?(status) do
-    Enum.member?(@status_order, status)
+  defp supported_status?(status, list) do
+    Enum.member?(list.visible_sections, status)
   end
 
-  defp status_surpassed?(activity_status, task_status) do
-    Enum.find_index(@status_order, fn status -> status == activity_status end) >
-      Enum.find_index(@status_order, fn status -> status == task_status end)
+  defp status_surpassed?(activity_status, task_status, list) do
+    Enum.find_index(list.visible_sections, fn status -> status == activity_status end) >
+      Enum.find_index(list.visible_sections, fn status -> status == task_status end)
   end
 
   defp get(path, query \\ %{}) do
@@ -185,6 +193,7 @@ defmodule Height do
           time_to_sleep =
             case result do
               {:ok, %{status: 429, headers: headers}} ->
+                Logger.info("Rate limited")
                 value = :proplists.get_value("retry-after", headers)
 
                 String.to_integer(value) * 1000

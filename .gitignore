@@ -16,3 +16,6 @@ erl_crash.dump
 .elasticbeanstalk/*
 !.elasticbeanstalk/*.cfg.yml
 !.elasticbeanstalk/*.global.yml
+
+height-*.json
+height-*.csv

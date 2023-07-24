@@ -14,7 +14,18 @@ $ asdf install
 
 ## Usage
 
-1. Get you API secret key on https://finbits.height.app/settings/api
-2. `HEIGHT_SECRET_KEY=$YOUR_SECRET_KEY_HERE elixir stories_export.exs`
+Get you API secret key on https://finbits.height.app/settings/api
+
+``` sh
+$ export HEIGHT_SECRET_KEY=YOUR_SECRET_KEY_HERE
+$ elixir height_export.exs
+```
 
 A csv file and a json file will be created with all the stories in it.
+
+We can also export tasks from other lists:
+
+``` sh
+$ elixir height_export.exs --list sup
+```
+
