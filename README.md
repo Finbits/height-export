@@ -4,8 +4,7 @@
 
 ``` sh
 $ /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-$ brew install asdf
-$ brew install git
+$ brew install git asdf autoconf openssl wxwidgets libxslt fop unzip
 $ asdf plugin add erlang https://github.com/asdf-vm/asdf-erlang.git
 $ asdf plugin-add elixir https://github.com/asdf-vm/asdf-elixir.git
 $ git clone https://github.com/Finbits/height-export.git
