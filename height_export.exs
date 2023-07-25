@@ -18,10 +18,7 @@ defmodule Height do
     list
     |> get_tasks(status_map)
     |> map("Getting activities", fn task ->
-      activities =
-        task.id
-        |> get_activities(list, status_map)
-        |> Enum.reject(&status_surpassed?(&1.status, task.status, list))
+      activities = get_activities(task, list, status_map)
 
       Map.put(task, :activities, activities)
     end)
@@ -115,9 +112,9 @@ defmodule Height do
     |> Enum.sort_by(& &1.created_at, Date)
   end
 
-  defp get_activities(task_id, list, status_map) do
+  defp get_activities(task, list, status_map) do
     "/activities"
-    |> get(%{"taskId" => task_id})
+    |> get(%{"taskId" => task.id})
     |> Map.fetch!("list")
     |> Enum.filter(fn activity -> activity["type"] == "statusChange" end)
     |> Enum.map(fn activity ->
@@ -131,6 +128,31 @@ defmodule Height do
     |> Enum.sort_by(& &1.created_at, Date)
     |> Enum.uniq_by(fn activity -> activity.status end)
     |> Enum.filter(&supported_status?(&1.status, list))
+    |> Enum.reject(&status_surpassed?(&1.status, task.status, list))
+    |> fill_middle_status(list)
+  end
+
+  defp fill_middle_status(activities, list) do
+    reversed_sections = Enum.reverse(list.visible_sections)
+    indexed_activities = Map.new(activities, fn a -> {a.status, a} end)
+
+    reversed_sections
+    |> Enum.with_index()
+    |> Enum.reduce(indexed_activities, fn {section, index}, acc ->
+      previous_status = Enum.at(reversed_sections, index + 1)
+
+      if Map.has_key?(acc, section) and not Map.has_key?(acc, previous_status) and
+           Enum.count(reversed_sections) - 1 != index do
+        activity = Map.fetch!(acc, section)
+        Map.put(acc, previous_status, %{activity | status: previous_status})
+      else
+        acc
+      end
+    end)
+    |> Map.values()
+    |> Enum.sort_by(fn a ->
+      Enum.find_index(list.visible_sections, fn section -> section == a.status end)
+    end)
   end
 
   defp get_list(key, status_map) do
@@ -168,23 +190,27 @@ defmodule Height do
       |> Map.put(:query, URI.encode_query(query))
       |> URI.to_string()
 
+    method = :get
+
+    method
+    |> with_cache(url, fn ->
+      with_retry(fn -> request(method, url) end)
+    end)
+    |> Jason.decode!()
+  end
+
+  defp request(method, url) do
     api_secret = System.fetch_env!("HEIGHT_SECRET_KEY")
 
-    with_cache(:get, url, fn ->
-      with_retry(fn ->
-        :get
-        |> Finch.build(url, [
-          {"Authorization", "api-key #{api_secret}"}
-        ])
-        |> Finch.request(Height)
-      end)
-    end)
+    method
+    |> Finch.build(url, [{"Authorization", "api-key #{api_secret}"}])
+    |> Finch.request(Height)
   end
 
   defp with_retry(request_fun, attempt \\ 1) do
     case request_fun.() do
       {:ok, %{status: 200, body: body}} ->
-        Jason.decode!(body)
+        body
 
       result ->
         if attempt >= 10 do
@@ -226,12 +252,12 @@ defmodule Height do
     if File.exists?(file_path) do
       Logger.info("Reading from cache #{method} #{url} at #{file_path}")
 
-      file_path |> File.read!() |> Jason.decode!()
+      file_path |> File.read!()
     else
       result = fun.()
 
       Logger.info("Writing result to cache at #{file_path}")
-      File.write!(file_path, Jason.encode!(result))
+      File.write!(file_path, result)
 
       result
     end
